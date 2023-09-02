@@ -1,39 +1,69 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from transformers import BertTokenizer, BertForSequenceClassification
+from pytube import YouTube
+import moviepy.editor as mp
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
+import os
+import whisper
 
+# Initialize Flask and CORS
 app = Flask(__name__)
 CORS(app)
 
-# Cargar el modelo y el tokenizador
-tokenizer = BertTokenizer.from_pretrained("bert-base-multilingual-cased")
-model = BertForSequenceClassification.from_pretrained("bert-base-multilingual-cased")
-model.eval()
+# Load models and tokenizers
+tokenizer_text = AutoTokenizer.from_pretrained("jsantamariag/RobertaAnubisLast")
+model_text = AutoModelForSequenceClassification.from_pretrained("jsantamariag/RobertaAnubisLast")
+model_text.eval()
 
+asr_model = model = whisper.load_model("large")
 
 @app.route('/analyze_video', methods=['POST'])
 def analyze_video():
-    # Usando un texto placeholder
-    text = "You are the worst because you are the one who has come here the most to laugh, to act respectful, when you are a fucking ignorant piece of shit, and you talk about my job or what I need or don't need. Imbecile! How disgusting you are! Ugh! How disgusting this pig is, huh! How disgusting this fucking pig is! Empathizing? No, the opposite of empathy. It\'s repulsive, huh? It\'s repulsive that some shithead comes here to tell me what I should or shouldn\'t earn when they have taken away a lot of money from me for fake bullshit, huh? Disgusting! Fucking pig! Fucking pig is what you are! Imbecile! How disgusting you are, huh! I swear it. How fucking disgusting you are! There comes a time when I can\'t stand his fucking shit-eating smile anymore, saying \'I wouldn\'t give you a dime if I knew what you were earning!\' Fucking moron! Fucking moron! How disgusting you are! Ugh! How disgusting you are!"
+    data = request.json
+    youtube_link = data.get('link', '')
 
+    if not youtube_link:
+        return jsonify({"error": "No YouTube link provided"}), 400
 
-    # Clasificar el texto
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+    # Download the full video
+    yt = YouTube(youtube_link)
+    video = yt.streams.get_highest_resolution()
+    out_file = video.download(output_path='.')
+
+    # Convert video to audio (.wav)
+    audio_path = "processed_audio.wav" #os.path.splitext(out_file)[0] + ".wav"
+
+    if os.path.exists(audio_path):
+        os.remove(audio_path)
+
+    video_clip = mp.VideoFileClip(out_file)
+    video_clip.audio.write_audiofile(audio_path)
+
+    # Perform ASR
+    print("Performing ASR...")
+    asr_result = model.transcribe("processed_audio.wav")
+    print(asr_result["text"])
+
+    transcribed_text = asr_result["text"]
+
+    # Classify the text
+    inputs_text = tokenizer_text(transcribed_text, return_tensors="pt", truncation=True, padding=True, max_length=512)
     with torch.no_grad():
-        outputs = model(**inputs)
-    logits = outputs.logits
+        outputs_text = model_text(**inputs_text)
+
+    logits = outputs_text.logits
     probabilities = torch.nn.functional.softmax(logits, dim=-1)
     predicted_class = torch.argmax(probabilities, dim=-1).item()
     confidence = probabilities[0][predicted_class].item() * 100
 
     result = {
+        'transcription': transcribed_text,
         'classification': 'Hate' if predicted_class == 1 else 'Not-Hate',
         'confidence': confidence
     }
 
     return jsonify(result)
 
-
 if __name__ == '__main__':
-    app.run()
+    app.run(debug=True)
