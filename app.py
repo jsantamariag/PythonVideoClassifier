@@ -23,61 +23,90 @@ asr_model = model = whisper.load_model("large")
 # Start program
 @app.route('/analyze_video', methods=['POST'])
 def analyze_video():
-    data = request.json
-    youtube_link = data.get('link', '')
+    out_file = None
+    audio_path = "processed_audio.wav"
+    result = {}
 
-    if not youtube_link:
-        return jsonify({"error": "No YouTube link provided"}), 400
+    try:
+        data = request.json
+        youtube_link = data.get('link', '')
 
-    # Download the full video
-    print("Downloading full video...")
-    socketio.emit('message', {'data': 'Downloading full video...'})
-    yt = YouTube(youtube_link)
-    video = yt.streams.get_highest_resolution()
-    out_file = video.download(output_path='.')
+        if not youtube_link:
+            return jsonify({"error": "No YouTube link provided"}), 400
 
-    # Convert video to audio (.wav)
-    print("Extracting audio...")
-    socketio.emit('message', {'data': 'Extracting audio...'})
-    audio_path = "processed_audio.wav" #os.path.splitext(out_file)[0] + ".wav"
+        # Download the full video
+        try:
+            print("Downloading full video...")
+            socketio.emit('message', {'data': 'Downloading video...'})
+            yt = YouTube(youtube_link)
+            video = yt.streams.get_highest_resolution()
+            out_file = video.download(output_path='.')
+        except Exception as e:
+            return jsonify({"error": "Error downloading video"}), 500
 
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
+        # Convert video to audio (.wav)
+        try:
+            print("Extracting audio...")
+            socketio.emit('message', {'data': 'Extracting audio...'})
 
-    video_clip = mp.VideoFileClip(out_file)
-    video_clip.audio.write_audiofile(audio_path)
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
 
-    # Perform ASR
-    print("Performing ASR...")
-    socketio.emit('message', {'data': 'Performing ASR...'})
-    asr_result = model.transcribe("processed_audio.wav")
-    print(asr_result["text"])
+            video_clip = mp.VideoFileClip(out_file)
+            video_clip.audio.write_audiofile(audio_path)
+            video_clip.close() # Close the video clip to release resources and prevent concurrency problems when deleting later
+        except Exception as e:
+            return jsonify({"error": "Error extracting audio"}), 500
 
-    transcribed_text = asr_result["text"]
+        # Perform ASR
+        try:
+            print("Performing ASR...")
+            socketio.emit('message', {'data': 'Performing Speech Recognition...'})
+            asr_result = asr_model.transcribe(audio_path)
+            transcribed_text = asr_result["text"]
+        except Exception as e:
+            return jsonify({"error": "Error performing ASR"}), 500
 
-    # Classify the text
-    print("Classifying text...")
-    socketio.emit('message', {'data': 'Classifying text...'})
+        # Classify the text
+        try:
+            print("Classifying text...")
+            socketio.emit('message', {'data': 'Classifying message...'})
 
-    inputs_text = tokenizer_text(transcribed_text, return_tensors="pt", truncation=True, padding=True, max_length=512)
-    with torch.no_grad():
-        outputs_text = model_text(**inputs_text)
+            inputs_text = tokenizer_text(transcribed_text, return_tensors="pt", truncation=True, padding=True,
+                                         max_length=512)
+            with torch.no_grad():
+                outputs_text = model_text(**inputs_text)
 
-    logits = outputs_text.logits
-    probabilities = torch.nn.functional.softmax(logits, dim=-1)
-    predicted_class = torch.argmax(probabilities, dim=-1).item()
-    confidence = probabilities[0][predicted_class].item() * 100
+            logits = outputs_text.logits
+            probabilities = torch.nn.functional.softmax(logits, dim=-1)
+            predicted_class = torch.argmax(probabilities, dim=-1).item()
+            confidence = probabilities[0][predicted_class].item() * 100
 
-    print("Preparing report...")
-    socketio.emit('message', {'data': 'Preparing report...'})
+            print("Preparing report...")
+            socketio.emit('message', {'data': 'Preparing report...'})
 
-    result = {
-        'transcription': transcribed_text,
-        'classification': 'Hate' if predicted_class == 1 else 'Not-Hate',
-        'confidence': confidence
-    }
+            result = {
+                'transcription': transcribed_text,
+                'classification': 'Hate' if predicted_class == 1 else 'Not-Hate',
+                'confidence': confidence
+            }
+        except Exception as e:
+            return jsonify({"error": "Error classifying text"}), 500
 
-    return jsonify(result)
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        socketio.emit('message', {'data': f"An unexpected error occurred: {e}"})
+        return jsonify({"error": "An unexpected error occurred during processing"}), 500
+
+    finally:
+        # Cleanup
+        if out_file and os.path.exists(out_file):
+            os.remove(out_file)
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+
 
 if __name__ == '__main__':
     socketio.run(app, debug=True)
