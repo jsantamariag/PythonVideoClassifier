@@ -27,11 +27,13 @@ def analyze_video():
         return jsonify({"error": "No YouTube link provided"}), 400
 
     # Download the full video
+    print("Downloading full video...")
     yt = YouTube(youtube_link)
     video = yt.streams.get_highest_resolution()
     out_file = video.download(output_path='.')
 
     # Convert video to audio (.wav)
+    print("Extracting audio...")
     audio_path = "processed_audio.wav" #os.path.splitext(out_file)[0] + ".wav"
 
     if os.path.exists(audio_path):
@@ -48,6 +50,7 @@ def analyze_video():
     transcribed_text = asr_result["text"]
 
     # Classify the text
+    print("Classifying text...")
     inputs_text = tokenizer_text(transcribed_text, return_tensors="pt", truncation=True, padding=True, max_length=512)
     with torch.no_grad():
         outputs_text = model_text(**inputs_text)
@@ -56,6 +59,8 @@ def analyze_video():
     probabilities = torch.nn.functional.softmax(logits, dim=-1)
     predicted_class = torch.argmax(probabilities, dim=-1).item()
     confidence = probabilities[0][predicted_class].item() * 100
+
+    print("Preparing report...")
 
     result = {
         'transcription': transcribed_text,
